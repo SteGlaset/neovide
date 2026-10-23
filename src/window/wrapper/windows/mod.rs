@@ -1,5 +1,7 @@
 mod context_menu;
+mod startup_presentation;
 
+pub(super) use startup_presentation::StartupPresentation;
 use winit::event::WindowEvent;
 use winit::platform::windows::BackdropType;
 use winit::platform::windows::Color;

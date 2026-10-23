@@ -204,6 +204,8 @@ impl fmt::Debug for Route {
 }
 
 struct RouteState {
+    #[cfg(windows)]
+    startup_presentation: Option<platform::StartupPresentation>,
     font_changed_last_frame: bool,
     saved_inner_size: dpi::PhysicalSize<u32>,
     saved_grid_size: Option<GridSize<u32>>,
@@ -220,6 +222,8 @@ struct RouteState {
 impl RouteState {
     fn new() -> Self {
         Self {
+            #[cfg(windows)]
+            startup_presentation: None,
             font_changed_last_frame: false,
             saved_inner_size: Default::default(),
             saved_grid_size: None,
@@ -1048,6 +1052,14 @@ impl WinitWindowWrapper {
         }
         if self.ui_state == UIState::FirstFrame {
             window.set_visible(true);
+            #[cfg(windows)]
+            {
+                log::info!(
+                    "startup presentation: first frame submitted at {:?}",
+                    window.inner_size()
+                );
+                drop(route.state.startup_presentation.take());
+            }
             self.ui_state = UIState::Showing;
         }
 
@@ -1153,6 +1165,12 @@ impl WinitWindowWrapper {
         let maximized = matches!(desired_window_size, WindowSize::Maximized);
         let window_config = create_window(event_loop, maximized, "Neovide", &self.settings, theme);
         let window = Rc::new(window_config.window.clone());
+        #[cfg(windows)]
+        let startup_presentation = if creating_initial_window && maximized {
+            platform::StartupPresentation::prepare(window_config.window.clone())
+        } else {
+            None
+        };
         let mut route_title = String::from("Neovide");
         #[cfg(target_os = "macos")]
         let mut route_document = platform::DocumentState::default();
@@ -1386,6 +1404,10 @@ impl WinitWindowWrapper {
         let mut mouse_manager = mouse_manager;
         mouse_manager.enabled = route_mouse_enabled;
         let mut state = RouteState::new();
+        #[cfg(windows)]
+        {
+            state.startup_presentation = startup_presentation;
+        }
         state.saved_inner_size = saved_inner_size;
         state.vsync = Some(vsync);
         state.inferred_theme = route_inferred_theme;
