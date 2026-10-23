@@ -239,3 +239,6 @@ incremental = true
 inherits = "release"
 debug = true
 strip = false
+
+[patch.crates-io]
+winit = { git = "https://github.com/SteGlaset/winit.git", rev = "1b0ee1d7c0518efe42eea15474341fb5b27efa92" }
