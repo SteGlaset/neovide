@@ -266,6 +266,9 @@ pub struct WinitWindowWrapper {
     // The destruction order has to be correct
     pub routes: FxHashMap<WindowId, Route>,
     route_cores: FxHashMap<RouteId, RouteCore>,
+    #[cfg(target_os = "windows")]
+    prepared_initial_window:
+        Option<(crate::renderer::WindowConfig, Option<platform::StartupPresentation>)>,
     pending_window_creation_route: Option<RouteId>,
     pub runtime: Option<NeovimRuntime>,
     pub runtime_tracker: RunningTracker,
@@ -300,6 +303,8 @@ impl WinitWindowWrapper {
         Self {
             routes: Default::default(),
             route_cores: FxHashMap::default(),
+            #[cfg(target_os = "windows")]
+            prepared_initial_window: None,
             pending_window_creation_route: None,
             runtime,
             runtime_tracker,
@@ -319,7 +324,11 @@ impl WinitWindowWrapper {
         let _ = proxy.send_event(EventPayload::all(UserEvent::NeovimLaunchError { message }));
     }
 
-    pub fn request_window_creation(&mut self, proxy: &EventLoopProxy<EventPayload>) {
+    pub fn request_window_creation(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        proxy: &EventLoopProxy<EventPayload>,
+    ) {
         if !self.routes.is_empty() || !self.route_cores.is_empty() {
             return;
         }
@@ -334,6 +343,9 @@ impl WinitWindowWrapper {
             determine_window_size(persisted_window_settings.as_ref(), &self.settings.clone());
         let desired_grid_size =
             determine_grid_size(&desired_window_size, persisted_window_settings);
+        #[cfg(target_os = "windows")]
+        let parallel_prepare = matches!(desired_window_size, WindowSize::Maximized)
+            && self.settings.get::<CmdLineSettings>().opengl;
         let pending_initial_window_size = match desired_window_size.clone() {
             WindowSize::Grid(_) | WindowSize::NeovimGrid => Some(desired_window_size),
             WindowSize::Maximized | WindowSize::Size(_) => None,
@@ -346,20 +358,60 @@ impl WinitWindowWrapper {
         ))));
 
         let route_id = RouteId::next();
+        #[cfg(target_os = "windows")]
+        let initial_theme = self.get_theme_for(None);
+        #[cfg(target_os = "windows")]
+        let window_settings = self.settings.clone();
+        let launch_settings = self.settings.clone();
+        let launch_tracker = self.runtime_tracker.clone();
+        let launch_proxy = proxy.clone();
         let runtime = self.runtime.as_mut().expect("Neovim runtime has not been initialized");
+        let launch = move || {
+            runtime.launch(
+                route_id,
+                launch_proxy,
+                desired_grid_size,
+                launch_tracker,
+                launch_settings,
+                &config,
+                None,
+                OpenMode::Startup,
+            )
+        };
 
-        let neovim_handler = match runtime.launch(
-            route_id,
-            proxy.clone(),
-            desired_grid_size,
-            self.runtime_tracker.clone(),
-            self.settings.clone(),
-            &config,
-            None,
-            OpenMode::Startup,
-        ) {
+        #[cfg(target_os = "windows")]
+        let launch_result = if parallel_prepare {
+            let prepared = &mut self.prepared_initial_window;
+            std::thread::scope(|scope| {
+                // Native windows and WGL stay on the event-loop thread. Only the
+                // blocking Neovim launch moves to a scoped worker, which is joined
+                // before returning to event dispatch and processing queued redraws.
+                let worker = scope.spawn(launch);
+                let window_config = {
+                    create_window(_event_loop, true, "Neovide", &window_settings, initial_theme)
+                };
+                let presentation =
+                    platform::StartupPresentation::prepare(window_config.window.clone());
+                *prepared = Some((window_config, presentation));
+                match worker.join() {
+                    Ok(result) => result,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+            })
+        } else {
+            launch()
+        };
+        #[cfg(not(target_os = "windows"))]
+        let launch_result = launch();
+
+        let neovim_handler = match launch_result {
             Ok(handler) => handler,
             Err(err) => {
+                #[cfg(target_os = "windows")]
+                if let Some((window_config, _presentation)) = self.prepared_initial_window.take() {
+                    // Keep the window hidden while the guard performs cleanup.
+                    window_config.window.set_visible(false);
+                }
                 let msg = format!("Failed to launch neovim runtime: {err:?}");
                 log::error!("{msg}");
                 self.report_startup_error(proxy, msg);
@@ -1163,14 +1215,27 @@ impl WinitWindowWrapper {
         };
         let theme = self.get_theme_for(initial_inferred_theme);
         let maximized = matches!(desired_window_size, WindowSize::Maximized);
-        let window_config = create_window(event_loop, maximized, "Neovide", &self.settings, theme);
-        let window = Rc::new(window_config.window.clone());
-        #[cfg(windows)]
-        let startup_presentation = if creating_initial_window && maximized {
-            platform::StartupPresentation::prepare(window_config.window.clone())
+        let create_window_config =
+            || create_window(event_loop, maximized, "Neovide", &self.settings, theme);
+        #[cfg(target_os = "windows")]
+        let prepared =
+            if creating_initial_window { self.prepared_initial_window.take() } else { None };
+        #[cfg(target_os = "windows")]
+        let (window_config, startup_presentation) = if let Some((config, presentation)) = prepared {
+            config.window.set_theme(theme);
+            (config, presentation)
         } else {
-            None
+            let config = create_window_config();
+            let presentation = if creating_initial_window && maximized {
+                platform::StartupPresentation::prepare(config.window.clone())
+            } else {
+                None
+            };
+            (config, presentation)
         };
+        #[cfg(not(target_os = "windows"))]
+        let window_config = create_window_config();
+        let window = Rc::new(window_config.window.clone());
         let mut route_title = String::from("Neovide");
         #[cfg(target_os = "macos")]
         let mut route_document = platform::DocumentState::default();

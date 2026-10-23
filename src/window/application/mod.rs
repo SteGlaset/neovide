@@ -830,7 +830,7 @@ impl ApplicationHandler<EventPayload> for Application {
         tracy_zone!("resumed");
         self.create_window_allowed = true;
         self.platform.resumed(&self.proxy);
-        self.window_wrapper.request_window_creation(&self.proxy);
+        self.window_wrapper.request_window_creation(event_loop, &self.proxy);
         self.schedule_next_event(event_loop);
     }
 

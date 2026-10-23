@@ -1,11 +1,11 @@
 # Experimental Windows startup improvements
 
-This branch is rebased onto upstream main at `882a51b0c3d0e83481a0b188e6853a00261e5757` and contains three independent changes:
+This branch is rebased onto upstream main at `882a51b0c3d0e83481a0b188e6853a00261e5757` and contains four independent changes:
 
 1. A Git-pinned winit 0.30.13 backport of [PR #4575](https://github.com/rust-windowing/winit/pull/4575).
 2. A Windows-only initial maximized-window presentation path using DWM cloaking.
 3. An optional native launcher that preserves hidden startup without a PowerShell process.
-
+4. Parallel Neovim launch and hidden-window preparation for initial maximized OpenGL startup on Windows.
 
 ## Patched dependency
 
@@ -50,7 +50,7 @@ condition of the tested workaround without starting a PowerShell interpreter.
 
 ## Validation and limits
 
-The following runtime and visual validation was performed on the original Neovide 0.16.2 base and must be repeated for the rebased main build.
+The original window-state and restore/maximize smoke checks below used the Neovide 0.16.2 base. The rebased main build and parallel-startup experiment were subsequently tested manually on Windows with OpenGL and maximized startup; no flicker, size change or dashboard shift was reported.
 
 The original release build and an MSVC launcher build with warnings as errors passed.
 A native Windows smoke check verified that the prepared window, submitted first
@@ -61,11 +61,32 @@ visible startup flicker using the hidden-start presentation workaround.
 
 An isolated child-process test verified the native launcher's hidden startup
 state, OpenGL argument and argument forwarding without opening an editor window.
-The final native-launcher shortcut still requires a manual end-to-end comparison;
-the earlier successful visual test used a PowerShell hidden-start launcher.
+Subsequent visual tests and the startup timing comparison used the native hidden-start launcher.
 
 This remains an experimental workaround. The individual contributions of
 cloaking, pre-maximization and temporary transition suppression have not been
 isolated. D3D, non-maximized startup, fullscreen, other display/DPI arrangements,
 and additional-window lifecycle paths have not been validated for this change.
-No end-to-end startup benchmark is claimed.
+The measurements below cover application startup to the first presentation boundary; they exclude process-loader time and physical display scanout.
+
+
+## Parallel startup
+
+For initial maximized OpenGL startup on Windows, the blocking Neovim launch runs
+on a scoped worker. The event-loop thread concurrently creates the hidden native
+window, selects its pixel format, and applies the cloaked maximized state.
+The worker is joined before returning to event dispatch, so route state exists
+before queued redraw events are processed. The prepared window is then reused;
+its theme is updated from the initialized Neovim state. Rendering, OpenGL context
+creation and first-frame presentation remain on the event-loop thread.
+Other startup modes retain the sequential path. Launch failure hides the prepared
+window before releasing its presentation guard.
+
+Four alternating instrumented A/B pairs measured a median of 412 ms for sequential
+startup and 282 ms for parallel startup. The first sequential run took 1196 ms;
+excluding the first pair gives 362 ms versus 282 ms across the remaining three
+pairs, a reduction of approximately 81 ms (22%). Traces confirmed overlapping
+Neovim/window preparation and reuse of the prepared window in every experimental
+run. The endpoint follows the first swap and DWM presentation-guard cleanup, not
+physical display scanout. These are local measurements, not a cross-system
+performance guarantee. Diagnostic instrumentation is omitted from this branch.
