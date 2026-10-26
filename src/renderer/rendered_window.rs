@@ -474,6 +474,12 @@ impl RenderedWindow {
         grid_scale: GridScale,
         bottommost_window: bool,
     ) -> PixelRect<f32> {
+        // The base grid contains the statusline and command line. Keep those rows at
+        // their real cell height and leave the fractional strip at the canvas background.
+        if matches!(self.id, BASE_GRID_ID | NO_MULTIGRID_GRID_ID) {
+            return pixel_region;
+        }
+
         let Some(content_region) = content_region else {
             return pixel_region;
         };
@@ -1279,7 +1285,7 @@ mod tests {
     fn grid_scale() -> GridScale { GridScale::new(PixelSize::new(8.0, 16.0)) }
 
     fn rendered_window() -> RenderedWindow {
-        let mut window = RenderedWindow::new(BASE_GRID_ID);
+        let mut window = RenderedWindow::new(2);
         window.grid_size = GridSize::new(80, 24);
         window
     }
@@ -1360,6 +1366,55 @@ mod tests {
             has_transparency: false,
             is_valid: true,
         }))
+    }
+
+    #[test]
+    fn base_grid_statusline_does_not_color_fractional_bottom_gap() {
+        let grid_scale = grid_scale();
+        let background = Color::from_rgb(31, 31, 40);
+        let statusline_background = Color4f::new(25.0 / 255.0, 25.0 / 255.0, 34.0 / 255.0, 1.0);
+        let mode_background = Color4f::new(126.0 / 255.0, 156.0 / 255.0, 216.0 / 255.0, 1.0);
+
+        for grid_id in [BASE_GRID_ID, NO_MULTIGRID_GRID_ID] {
+            let mut window = positioned_rendered_window((20, 4));
+            window.id = grid_id;
+            window.viewport_margins = ViewportMargins { top: 0, bottom: 1 };
+            let line = test_rendered_line();
+            {
+                let mut line = line.borrow_mut();
+                line.background_runs.push(0..10, mode_background);
+                line.background_runs.push(10..20, statusline_background);
+                line.trailing_background = Some(statusline_background);
+            }
+            window.actual_lines[3] = Some(line);
+
+            let grid_region = window.pixel_region(grid_scale);
+            let content_region = PixelRect::new(grid_region.min, PixelPos::new(163.0, 71.0));
+            let region =
+                window.expanded_pixel_region(grid_region, Some(content_region), grid_scale, true);
+            let region =
+                window.expanded_bottom_pixel_region(region, Some(content_region), grid_scale, true);
+            let mut surface = skia_safe::surfaces::raster_n32_premul((163, 71)).unwrap();
+            surface.canvas().clear(background);
+            window.draw_edge_background_surface(surface.canvas(), region, grid_scale);
+            let pixels = surface.peek_pixels().unwrap();
+
+            assert_eq!(
+                pixels.get_color((4, 67)),
+                background,
+                "mode background leaked below grid {grid_id}"
+            );
+            assert_eq!(
+                pixels.get_color((100, 67)),
+                background,
+                "statusline background leaked below grid {grid_id}"
+            );
+            assert_eq!(
+                pixels.get_color((161, 60)),
+                statusline_background.to_color(),
+                "right edge fill must remain intact"
+            );
+        }
     }
 
     fn positioned_rendered_window(grid_size: (u64, u64)) -> RenderedWindow {
